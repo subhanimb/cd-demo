@@ -1,90 +1,96 @@
-  env.DOCKERHUB_USERNAME = 'subhanimb'
+#!groovy
 
-  node("docker-test") {
-    checkout scm
+/*
+The MIT License
 
-    stage("Unit Test") {
-      sh "docker run --rm -v ${WORKSPACE}:/go/src/cd-demo golang go test cd-demo -v --run Unit"
-    }
-    stage("Integration Test") {
-      try {
-        sh "docker build -t cd-demo ."
-        sh "docker rm -f cd-demo || true"
-        sh "docker run -d -p 8080:8080 --name=cd-demo cd-demo"
-        // env variable is used to set the server where go test will connect to run the test
-        sh "docker run --rm -v ${WORKSPACE}:/go/src/cd-demo --link=cd-demo -e SERVER=cd-demo golang go test cd-demo -v --run Integration"
-      }
-      catch(e) {
-        error "Integration Test failed"
-      }finally {
-        sh "docker rm -f cd-demo || true"
-        sh "docker ps -aq | xargs docker rm || true"
-        sh "docker images -aq -f dangling=true | xargs docker rmi || true"
-      }
-    }
-    stage("Build") {
-      sh "docker build -t ${DOCKERHUB_USERNAME}/cd-demo:${BUILD_NUMBER} ."
-    }
-    stage("Publish") {
-      withDockerRegistry([credentialsId: 'DockerHub']) {
-        sh "docker push ${DOCKERHUB_USERNAME}/cd-demo:${BUILD_NUMBER}"
-      }
-    }
-  }
+Copyright (c) 2015-, CloudBees, Inc., and a number of other of contributors
 
-  node("docker-stage") {
-    checkout scm
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-    stage("Staging") {
-      try {
-        sh "docker rm -f cd-demo || true"
-        sh "docker run -d -p 8080:8080 --name=cd-demo ${DOCKERHUB_USERNAME}/cd-demo:${BUILD_NUMBER}"
-        sh "docker run --rm -v ${WORKSPACE}:/go/src/cd-demo --link=cd-demo -e SERVER=cd-demo golang go test cd-demo -v"
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
 
-      } catch(e) {
-        error "Staging failed"
-      } finally {
-        sh "docker rm -f cd-demo || true"
-        sh "docker ps -aq | xargs docker rm || true"
-        sh "docker images -aq -f dangling=true | xargs docker rmi || true"
-      }
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+node('node') {
+
+
+    currentBuild.result = "SUCCESS"
+
+    try {
+
+       stage('Checkout'){
+
+          checkout scm
+       }
+
+       stage('Test'){
+
+         env.NODE_ENV = "test"
+
+         print "Environment will be : ${env.NODE_ENV}"
+
+         sh 'node -v'
+         sh 'npm prune'
+         sh 'npm install'
+         sh 'npm test'
+
+       }
+
+       stage('Build Docker'){
+
+            sh './dockerBuild.sh'
+       }
+
+       stage('Deploy'){
+
+         echo 'Push to Repo'
+         sh './dockerPushToRepo.sh'
+
+         echo 'ssh to web server and tell it to pull new image'
+         sh 'ssh deploy@xxxxx.xxxxx.com running/xxxxxxx/dockerRun.sh'
+
+       }
+
+       stage('Cleanup'){
+
+         echo 'prune and cleanup'
+         sh 'npm prune'
+         sh 'rm node_modules -rf'
+
+         mail body: 'project build successful',
+                     from: 'xxxx@yyyyy.com',
+                     replyTo: 'xxxx@yyyy.com',
+                     subject: 'project build successful',
+                     to: 'yyyyy@yyyy.com'
+       }
+
+
+
     }
-  }
+    catch (err) {
 
-  node("docker-prod") {
-    stage("Production") {
-      try {
-        // Create the service if it doesn't exist otherwise just update the image
-        sh '''
-          SERVICES=$(docker service ls --filter name=cd-demo --quiet | wc -l)
-          if [[ "$SERVICES" -eq 0 ]]; then
-            docker network rm cd-demo || true
-            docker network create --driver overlay --attachable cd-demo
-            docker service create --replicas 3 --network cd-demo --name cd-demo -p 8080:8080 ${DOCKERHUB_USERNAME}/cd-demo:${BUILD_NUMBER}
-          else
-            docker service update --image ${DOCKERHUB_USERNAME}/cd-demo:${BUILD_NUMBER} cd-demo
-          fi
-          '''
-        // run some final tests in production
-        checkout scm
-        sh '''
-          sleep 60s 
-          for i in `seq 1 20`;
-          do
-            STATUS=$(docker service inspect --format '{{ .UpdateStatus.State }}' cd-demo)
-            if [[ "$STATUS" != "updating" ]]; then
-              docker run --rm -v ${WORKSPACE}:/go/src/cd-demo --network cd-demo -e SERVER=cd-demo golang go test cd-demo -v --run Integration
-              break
-            fi
-            sleep 10s
-          done
-          
-        '''
-      }catch(e) {
-        sh "docker service update --rollback  cd-demo"
-        error "Service update failed in production"
-      }finally {
-        sh "docker ps -aq | xargs docker rm || true"
-      }
+        currentBuild.result = "FAILURE"
+
+            mail body: "project build error is here: ${env.BUILD_URL}" ,
+            from: 'xxxx@yyyy.com',
+            replyTo: 'yyyy@yyyy.com',
+            subject: 'project build failed',
+            to: 'zzzz@yyyyy.com'
+
+        throw err
     }
-  }
+
+}
